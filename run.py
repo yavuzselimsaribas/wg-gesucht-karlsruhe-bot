@@ -139,7 +139,7 @@ def main():
     # Apply the configured filters (max_price, etc.) but NOT "already seen" — we do
     # our own dedup so we can mark a listing seen only after it was sent successfully.
     flat_filter = Filter.builder().read_config(config).build()
-    exposes = flat_filter.process_exposes(hunter.crawl_for_exposes())
+    exposes = flat_filter.filter(hunter.crawl_for_exposes())
 
     new_count = 0
     sent_count = 0
