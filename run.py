@@ -3,33 +3,31 @@
 Custom runner for the wg-gesucht Karlsruhe bot.
 
 Why not Flathunter's own `flathunt.py`?
-  - Flathunter's Telegram notifier sends plain text and, for wg-gesucht, sends no
-    image (the crawler stores a single `image` but the notifier reads `images`).
-  - We want a rich card: the listing photo + a nicely formatted caption with a
-    clickable link.
+  - Its Telegram notifier sends plain text and, for wg-gesucht, attaches no image.
+  - We want a rich card: the listing photo + a formatted caption that includes the
+    full cost breakdown (Kaltmiete, Nebenkosten, Kaution, ...).
 
-So we reuse the parts of Flathunter that are hard (its battle-tested wg-gesucht
-crawler, the price filter, and the SQLite "already seen" store) and do the
-Telegram sending ourselves.
+So we reuse the parts of Flathunter that are hard (its wg-gesucht list crawler, the
+price filter, and the SQLite "already seen" store) and, for each listing we're about
+to send, fetch the listing's detail page ourselves to pull the cost breakdown +
+photo + address. Telegram sending is also done here.
 
-Modes:
-  - LIVE  : Telegram credentials present (and PRIME != "true") -> send a message
-            per new listing, then mark it seen.
-  - SILENT: no credentials, or PRIME="true" -> just mark current listings seen,
-            send nothing (used for the first "prime" run).
-
-Credentials + DB location are read from the same FLATHUNTER_* environment
-variables Flathunter uses, via its Config object.
+Modes (set via env):
+  - TEST=true  : send ONE sample listing (preview), without touching dedup.
+  - PRIME=true : record current listings as seen, send nothing.
+  - otherwise  : LIVE — send each new listing, mark it seen after delivery.
+                 (No credentials -> behaves like PRIME, silently.)
 """
 
 import argparse
 import html
 import os
+import re
 import socket
-import sys
 import time
 
 import requests
+from bs4 import BeautifulSoup
 
 from flathunter.config import Config
 from flathunter.idmaintainer import IdMaintainer
@@ -43,6 +41,9 @@ from flathunter.logging import logger, configure_logging
 # fails fast and is simply retried on the next run.
 socket.setdefaulttimeout(30)
 
+USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="wg-gesucht -> Telegram alert bot")
@@ -51,35 +52,135 @@ def parse_args():
 
 
 def clean_image_url(url):
-    """Normalise the background-image URL pulled from a listing card."""
+    """Normalise an image URL."""
     if not url:
         return None
     url = str(url).strip().strip('"').strip("'")
     if url.startswith("//"):
         url = "https:" + url
-    if not url.startswith("http"):
+    return url if url.startswith("http") else None
+
+
+def euro_int(value):
+    """'280€' / '1.250 €' -> int; 'n.a.' / '' -> None."""
+    if not value:
         return None
-    return url
+    digits = re.sub(r"[^\d]", "", str(value))
+    return int(digits) if digits else None
+
+
+def fetch_details(url):
+    """Fetch a listing's detail page and extract cost breakdown, photo and address.
+
+    Returns a dict (possibly partial). Never raises — on any error returns {}.
+    """
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=25)
+        if resp.status_code != 200:
+            logger.warning("Detail page %s returned %s", url, resp.status_code)
+            return {}
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as exc:  # network / parse — degrade gracefully
+        logger.warning("Could not fetch details for %s: %s", url, exc)
+        return {}
+
+    details = {}
+
+    og_image = soup.find("meta", attrs={"property": "og:image"})
+    if og_image and og_image.get("content"):
+        details["image"] = og_image["content"]
+
+    # Cost rows are <div class="row"> containing a .section_panel_detail (label)
+    # and a .section_panel_value (amount). Pair them by their shared row.
+    costs = {}
+    for row in soup.select(".row"):
+        label_el = row.select_one(".section_panel_detail")
+        value_el = row.select_one(".section_panel_value")
+        if label_el and value_el:
+            key = " ".join(label_el.get_text().split()).rstrip(":").strip()
+            val = " ".join(value_el.get_text().split()).strip()
+            if key:
+                costs[key] = val
+    details["costs"] = costs
+
+    address_el = soup.select_one('a[href="#mapContainer"]')
+    if address_el:
+        details["address"] = " ".join(address_el.get_text().split())
+
+    return details
+
+
+def enrich(expose):
+    """Merge detail-page data (photo / costs / address) into an expose."""
+    details = fetch_details(expose.get("url", ""))
+    if details.get("image"):
+        expose["image"] = details["image"]  # og:image beats the card thumbnail
+    expose["costs"] = details.get("costs", {})
+    if details.get("address"):
+        expose["address_clean"] = details["address"]
+    return expose
+
+
+def esc(text):
+    return html.escape(str(text).strip())
 
 
 def build_caption(expose):
-    """Build a Telegram HTML caption for a listing."""
-    def field(key, fallback="—"):
-        value = str(expose.get(key, "") or "").strip()
-        return html.escape(value) if value else fallback
+    """Build a Telegram HTML caption. Only includes fields that actually exist."""
+    costs = expose.get("costs", {})
+    kalt = euro_int(costs.get("Miete"))
+    nk = euro_int(costs.get("Nebenkosten"))
+    sonstige = euro_int(costs.get("Sonstige Kosten"))
+    kaution = euro_int(costs.get("Kaution"))
+    ablose = euro_int(costs.get("Ablösevereinbarung"))
+    frei_ab = costs.get("frei ab")
 
-    title = field("title", "wg-gesucht listing")
-    price = field("price", "n/a")
-    size = field("size", "n/a")
-    rooms = field("rooms", "?")
-    url = html.escape(str(expose.get("url", "")).strip())
+    lines = [f"🏠 <b>{esc(expose.get('title') or 'wg-gesucht listing')}</b>"]
 
-    return (
-        f"🏠 <b>{title}</b>\n\n"
-        f"💶 <b>{price}</b>\n"
-        f"📐 {size}   ·   🚪 {rooms} Zimmer\n\n"
-        f'🔗 <a href="{url}">Open on wg-gesucht →</a>'
-    )
+    address = expose.get("address_clean")
+    if address:
+        lines.append(f"📍 {esc(address)}")
+
+    lines.append("")
+
+    # Headline price = what wg-gesucht shows (and what the <500 filter checks).
+    price = (expose.get("price") or "").strip()
+    if price:
+        lines.append(f"💶 <b>{esc(price)}</b> total")
+
+    breakdown = []
+    if kalt is not None:
+        breakdown.append(f"Kalt {kalt} €")
+    if nk is not None:
+        breakdown.append(f"Nebenkosten {nk} €")
+    if sonstige is not None:
+        breakdown.append(f"Sonstige {sonstige} €")
+    if breakdown:
+        lines.append("   " + "  +  ".join(breakdown))
+
+    extras = []
+    if kaution is not None:
+        extras.append(f"Kaution {kaution} €")
+    if ablose is not None:
+        extras.append(f"Ablöse {ablose} €")
+    if extras:
+        lines.append("   " + "  ·  ".join(extras))
+
+    facts = []
+    size = (expose.get("size") or "").strip()
+    if size:
+        facts.append(f"📐 {esc(size)}")
+    rooms = (expose.get("rooms") or "").strip()
+    if rooms and rooms not in ("?", "0"):
+        facts.append(f"🚪 {esc(rooms)} Zi.")
+    if frei_ab:
+        facts.append(f"📅 ab {esc(frei_ab)}")
+    if facts:
+        lines.append("  ·  ".join(facts))
+
+    lines.append("")
+    lines.append(f'🔗 <a href="{esc(expose.get("url", ""))}">Open on wg-gesucht →</a>')
+    return "\n".join(lines)
 
 
 def send_listing(token, chat_id, expose):
@@ -90,7 +191,7 @@ def send_listing(token, chat_id, expose):
 
     def post(method, payload):
         resp = requests.post(f"{base}/{method}", data=payload, timeout=30)
-        if resp.status_code == 429:  # rate limited - back off once and retry
+        if resp.status_code == 429:
             retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
             time.sleep(min(int(retry_after), 30))
             resp = requests.post(f"{base}/{method}", data=payload, timeout=30)
@@ -99,10 +200,8 @@ def send_listing(token, chat_id, expose):
     try:
         if image:
             resp = post("sendPhoto", {
-                "chat_id": chat_id,
-                "photo": image,
-                "caption": caption,
-                "parse_mode": "HTML",
+                "chat_id": chat_id, "photo": image,
+                "caption": caption, "parse_mode": "HTML",
             })
             if resp.status_code == 200:
                 return True
@@ -110,9 +209,7 @@ def send_listing(token, chat_id, expose):
                            resp.status_code, resp.text[:200])
 
         resp = post("sendMessage", {
-            "chat_id": chat_id,
-            "text": caption,
-            "parse_mode": "HTML",
+            "chat_id": chat_id, "text": caption, "parse_mode": "HTML",
             "disable_web_page_preview": "false",
         })
         if resp.status_code != 200:
@@ -130,9 +227,7 @@ def main():
     configure_logging(config)
     config.init_searchers()
 
-    db_location = config.database_location()
-    id_watch = IdMaintainer(f"{db_location}/processed_ids.db")
-
+    id_watch = IdMaintainer(f"{config.database_location()}/processed_ids.db")
     token = config.telegram_bot_token()
     receivers = config.telegram_receiver_ids() or []
     test = os.environ.get("TEST", "").lower() == "true"
@@ -141,14 +236,12 @@ def main():
     )
 
     hunter = Hunter(config, id_watch)
-    # Apply the configured filters (max_price, etc.) but NOT "already seen" — we do
-    # our own dedup so we can mark a listing seen only after it was sent successfully.
+    # Configured filters (max_price, ...) but NOT "already seen" — we dedup ourselves
+    # so a listing is marked seen only after it has been delivered.
     flat_filter = Filter.builder().read_config(config).build()
     exposes = flat_filter.filter(hunter.crawl_for_exposes())
 
-    # TEST mode: send ONE sample listing so you can preview the card, without
-    # touching dedup. Prefer an already-seen listing that has an image, so the
-    # preview never "uses up" a genuinely new listing.
+    # TEST: preview one sample (prefer an already-seen one) without touching dedup.
     if test:
         if not token or not receivers:
             logger.error("TEST mode needs Telegram credentials (bot token + receiver id).")
@@ -158,13 +251,14 @@ def main():
         for expose in exposes:
             if fallback is None:
                 fallback = expose
-            if clean_image_url(expose.get("image")) and id_watch.is_processed(expose.get("id")):
+            if id_watch.is_processed(expose.get("id")):
                 sample = expose
                 break
         sample = sample or fallback
         if sample is None:
             logger.warning("No current listings under the price filter to sample.")
             return
+        enrich(sample)
         delivered = all(send_listing(token, chat_id, sample) for chat_id in receivers)
         logger.info("TEST done — sample '%s' delivered=%s", sample.get("title"), delivered)
         return
@@ -186,6 +280,7 @@ def main():
             id_watch.mark_processed(expose_id)
             continue
 
+        enrich(expose)
         delivered = all(send_listing(token, chat_id, expose) for chat_id in receivers)
         if delivered:
             id_watch.mark_processed(expose_id)
@@ -193,7 +288,7 @@ def main():
         else:
             logger.warning("Delivery failed for '%s' — will retry next run.",
                            expose.get("title", expose_id))
-        time.sleep(1)  # gentle pacing to stay under Telegram flood limits
+        time.sleep(1)  # gentle pacing for Telegram flood limits
 
     logger.info("Done. New listings: %d, messages sent: %d, mode: %s",
                 new_count, sent_count, "silent" if prime else "live")
