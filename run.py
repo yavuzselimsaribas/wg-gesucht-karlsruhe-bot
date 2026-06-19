@@ -25,6 +25,7 @@ variables Flathunter uses, via its Config object.
 import argparse
 import html
 import os
+import socket
 import sys
 import time
 
@@ -35,6 +36,12 @@ from flathunter.idmaintainer import IdMaintainer
 from flathunter.hunter import Hunter
 from flathunter.filter import Filter
 from flathunter.logging import logger, configure_logging
+
+# wg-gesucht's crawler issues some requests without a timeout. If the site throttles
+# the runner's IP, that connection can hang indefinitely (stalling until the job's
+# 15-minute limit). A default socket timeout bounds every request so a hung crawl
+# fails fast and is simply retried on the next run.
+socket.setdefaulttimeout(30)
 
 
 def parse_args():
