@@ -1,0 +1,11 @@
+# NOTE: processed_ids.db is intentionally TRACKED — it is the bot's memory of
+# which listings were already seen. Do not ignore it.
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+flathunter/          # local clone of upstream, if you test on your machine
+*.log
+.DS_Store
+config.local.yaml

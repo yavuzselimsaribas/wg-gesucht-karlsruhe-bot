@@ -1,0 +1,47 @@
+---
+# wg-gesucht Karlsruhe alert bot — Flathunter configuration.
+#
+# This file holds only NON-SECRET settings and is safe to commit publicly.
+# The Telegram bot token and your chat id are injected at runtime via
+# FLATHUNTER_* environment variables (GitHub Actions secrets) and are never
+# stored here. See .github/workflows/hunt.yml.
+
+# Run a single pass per invocation. GitHub Actions cron handles repetition,
+# so Flathunter must NOT loop internally.
+loop:
+    active: false
+
+# What to watch. wg-gesucht URL pattern:
+#   <type>-in-Karlsruhe.68.<category>.1.0.html   (68 = Karlsruhe city id)
+#   category 0 = WG room, 1 = 1-room apartment, 2 = apartment, 3 = house
+urls:
+    # WG rooms (shared flats)
+    - https://www.wg-gesucht.de/wg-zimmer-in-Karlsruhe.68.0.1.0.html
+    # 1-room apartments (studio / 1-Zimmer-Wohnung, mini kitchen + bath)
+    - https://www.wg-gesucht.de/1-zimmer-wohnungen-in-Karlsruhe.68.1.1.0.html
+    # Apartments (Wohnung, any room count)
+    - https://www.wg-gesucht.de/wohnungen-in-Karlsruhe.68.2.1.0.html
+
+# Drop anything above your budget. Flathunter compares against the total
+# rent shown on the listing. Raise/lower this anytime.
+filters:
+    max_price: 500
+
+# Telegram message body. Available placeholders:
+# {title} {price} {size} {rooms} {address} {url} {crawler} {durations}
+message: |
+    🏠 {title}
+    💶 {price}    📐 {size}    🚪 {rooms}
+    📍 {address}
+
+    {url}
+
+title: "New wg-gesucht listing"
+
+# Left empty on purpose: with no notifier here, a PRIME run stays silent.
+# Live runs set notifiers + Telegram credentials via env vars instead.
+notifiers:
+
+telegram:
+
+captcha:
