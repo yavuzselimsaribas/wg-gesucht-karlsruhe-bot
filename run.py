@@ -2,32 +2,29 @@
 """
 Custom runner for the wg-gesucht Karlsruhe bot.
 
-Why not Flathunter's own `flathunt.py`?
-  - Its Telegram notifier sends plain text and, for wg-gesucht, attaches no image.
-  - We want a rich card: the listing photo + a formatted caption that includes the
-    full cost breakdown (Kaltmiete, Nebenkosten, Kaution, ...).
+Flathunter's own crawler + filters + "already seen" store do the hard part
+(finding listings on the search pages and remembering which we've handled). For
+each listing we're about to send, we call wg-gesucht's public JSON API
+(`/api/public/offers/<id>`) to get the full photo gallery, the exact cost
+breakdown and the address — then send a rich Telegram card ourselves.
 
-So we reuse the parts of Flathunter that are hard (its wg-gesucht list crawler, the
-price filter, and the SQLite "already seen" store) and, for each listing we're about
-to send, fetch the listing's detail page ourselves to pull the cost breakdown +
-photo + address. Telegram sending is also done here.
-
-Modes (set via env):
-  - TEST=true  : send ONE sample listing (preview), without touching dedup.
-  - PRIME=true : record current listings as seen, send nothing.
-  - otherwise  : LIVE — send each new listing, mark it seen after delivery.
-                 (No credentials -> behaves like PRIME, silently.)
+Modes (env):
+  TEST=true  -> send ONE sample listing (preview), without touching dedup.
+  PRIME=true -> record current listings as seen, send nothing.
+  otherwise  -> LIVE: send each new listing, mark seen after delivery.
+                (No credentials -> behaves like PRIME, silently.)
 """
 
 import argparse
 import html
+import json
 import os
 import re
 import socket
 import time
+import urllib.parse
 
 import requests
-from bs4 import BeautifulSoup
 
 from flathunter.config import Config
 from flathunter.idmaintainer import IdMaintainer
@@ -35,172 +32,168 @@ from flathunter.hunter import Hunter
 from flathunter.filter import Filter
 from flathunter.logging import logger, configure_logging
 
-# wg-gesucht's crawler issues some requests without a timeout. If the site throttles
-# the runner's IP, that connection can hang indefinitely (stalling until the job's
-# 15-minute limit). A default socket timeout bounds every request so a hung crawl
-# fails fast and is simply retried on the next run.
+# wg-gesucht sometimes issues requests without a timeout; a default socket timeout
+# stops a throttled connection from hanging until the job's 15-minute limit.
 socket.setdefaulttimeout(30)
 
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+IMG_BASE = "https://img.wg-gesucht.de/"
+MAX_PHOTOS = 10  # Telegram allows up to 10 media per group
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="wg-gesucht -> Telegram alert bot")
-    parser.add_argument("-c", "--config", default="config.yaml", help="path to config.yaml")
+    parser.add_argument("-c", "--config", default="config.yaml")
     return parser.parse_args()
 
 
-def clean_image_url(url):
-    """Normalise an image URL."""
-    if not url:
-        return None
-    url = str(url).strip().strip('"').strip("'")
-    if url.startswith("//"):
-        url = "https:" + url
-    return url if url.startswith("http") else None
-
-
-def euro_int(value):
-    """'280€' / '1.250 €' -> int; 'n.a.' / '' -> None."""
-    if not value:
+def to_int(value):
+    """'280' / '1.250 €' -> int; None / '' / '0' handled (0 returns 0)."""
+    if value is None:
         return None
     digits = re.sub(r"[^\d]", "", str(value))
-    return int(digits) if digits else None
-
-
-def fetch_details(url):
-    """Fetch a listing's detail page and extract cost breakdown, photo and address.
-
-    Returns a dict (possibly partial). Never raises — on any error returns {}.
-    """
-    try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=25)
-        if resp.status_code != 200:
-            logger.warning("Detail page %s returned %s", url, resp.status_code)
-            return {}
-        soup = BeautifulSoup(resp.text, "html.parser")
-    except Exception as exc:  # network / parse — degrade gracefully
-        logger.warning("Could not fetch details for %s: %s", url, exc)
-        return {}
-
-    details = {}
-
-    og_image = soup.find("meta", attrs={"property": "og:image"})
-    if og_image and og_image.get("content"):
-        details["image"] = og_image["content"]
-
-    # Cost rows are <div class="row"> containing a .section_panel_detail (label)
-    # and a .section_panel_value (amount). Pair them by their shared row.
-    costs = {}
-    for row in soup.select(".row"):
-        label_el = row.select_one(".section_panel_detail")
-        value_el = row.select_one(".section_panel_value")
-        if label_el and value_el:
-            key = " ".join(label_el.get_text().split()).rstrip(":").strip()
-            val = " ".join(value_el.get_text().split()).strip()
-            if key:
-                costs[key] = val
-    details["costs"] = costs
-
-    address_el = soup.select_one('a[href="#mapContainer"]')
-    if address_el:
-        details["address"] = " ".join(address_el.get_text().split())
-
-    return details
-
-
-def enrich(expose):
-    """Merge detail-page data (photo / costs / address) into an expose."""
-    details = fetch_details(expose.get("url", ""))
-    if details.get("image"):
-        expose["image"] = details["image"]  # og:image beats the card thumbnail
-    expose["costs"] = details.get("costs", {})
-    if details.get("address"):
-        expose["address_clean"] = details["address"]
-    return expose
+    return int(digits) if digits != "" else None
 
 
 def esc(text):
     return html.escape(str(text).strip())
 
 
+def clean_title(title):
+    title = (title or "").strip()
+    # Flathunter appends " ab dem <date>" / " vom <date> bis <date>"; we show the
+    # date on its own row, so drop the suffix to avoid duplication.
+    title = re.sub(r"\s+(ab dem\s+\d.*|vom\s+\d.*)$", "", title)
+    return title or "wg-gesucht listing"
+
+
+def fetch_offer_api(offer_id):
+    """wg-gesucht public offer API -> dict (gallery, costs, address). {} on error."""
+    url = f"https://www.wg-gesucht.de/api/public/offers/{offer_id}"
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=25)
+        if resp.status_code != 200:
+            logger.warning("Offer API %s returned %s", offer_id, resp.status_code)
+            return {}
+        return resp.json()
+    except Exception as exc:  # network / JSON — degrade gracefully
+        logger.warning("Offer API failed for %s: %s", offer_id, exc)
+        return {}
+
+
+def enrich(expose):
+    """Pull gallery, cost breakdown and address from the public API into `expose`."""
+    api = fetch_offer_api(expose.get("id"))
+    if not api:
+        return expose
+
+    images = []
+    for img in (api.get("images") or []):
+        sized = img.get("sized")
+        if sized:
+            images.append(IMG_BASE + sized.lstrip("/"))
+    expose["images"] = images[:MAX_PHOTOS]
+
+    expose["total"] = to_int(api.get("total_costs"))
+    expose["kalt"] = to_int(api.get("rent_costs"))
+    expose["nk"] = to_int(api.get("utility_costs"))
+    expose["sonstige"] = to_int(api.get("other_costs"))
+    expose["kaution"] = to_int(api.get("bond_costs"))
+    expose["ablose"] = to_int(api.get("equipment_costs"))
+    expose["size_m2"] = to_int(api.get("property_size"))
+    expose["rooms_n"] = to_int(api.get("number_of_rooms"))
+
+    frei = (api.get("available_from_date") or "").strip()
+    expose["frei_ab"] = frei if frei and frei != "00.00.0000" else None
+
+    street = (api.get("street") or "").strip()
+    plz_city = " ".join(x for x in [(api.get("postcode") or "").strip(),
+                                    (api.get("city_name") or "").strip()] if x)
+    district = (api.get("district_custom") or "").strip()
+    address_bits = [b for b in [street, plz_city, district] if b]
+    expose["address"] = ", ".join(dict.fromkeys(address_bits))  # de-dup, keep order
+
+    try:
+        lat, lng = float(api.get("geo_latitude")), float(api.get("geo_longitude"))
+    except (TypeError, ValueError):
+        lat = lng = 0.0
+    query = f"{lat},{lng}" if (lat and lng) else (expose["address"] or f"{street} Karlsruhe")
+    expose["maps_url"] = ("https://www.google.com/maps/search/?api=1&query="
+                          + urllib.parse.quote(query))
+    return expose
+
+
 def build_caption(expose):
-    """Build a Telegram HTML caption. Only includes fields that actually exist."""
-    costs = expose.get("costs", {})
-    kalt = euro_int(costs.get("Miete"))
-    nk = euro_int(costs.get("Nebenkosten"))
-    sonstige = euro_int(costs.get("Sonstige Kosten"))
-    kaution = euro_int(costs.get("Kaution"))
-    ablose = euro_int(costs.get("Ablösevereinbarung"))
-    frei_ab = costs.get("frei ab")
+    """Vertical Telegram HTML card — one fact per row, empty fields omitted."""
+    lines = [f"🏠 <b>{esc(clean_title(expose.get('title')))}</b>"]
 
-    lines = [f"🏠 <b>{esc(expose.get('title') or 'wg-gesucht listing')}</b>"]
-
-    address = expose.get("address_clean")
-    if address:
+    address = expose.get("address")
+    if address and expose.get("maps_url"):
+        lines.append(f'📍 <a href="{esc(expose["maps_url"])}">{esc(address)}</a>')
+    elif address:
         lines.append(f"📍 {esc(address)}")
 
     lines.append("")
+    total = expose.get("total")
+    if total:
+        lines.append(f"💰 <b>Gesamt: {total} €</b> / Monat")
+    elif (expose.get("price") or "").strip():
+        lines.append(f"💰 <b>{esc(expose['price'])}</b>")
 
-    # Headline price = what wg-gesucht shows (and what the <500 filter checks).
-    price = (expose.get("price") or "").strip()
-    if price:
-        lines.append(f"💶 <b>{esc(price)}</b> total")
-
-    breakdown = []
-    if kalt is not None:
-        breakdown.append(f"Kalt {kalt} €")
-    if nk is not None:
-        breakdown.append(f"Nebenkosten {nk} €")
-    if sonstige is not None:
-        breakdown.append(f"Sonstige {sonstige} €")
-    if breakdown:
-        lines.append("   " + "  +  ".join(breakdown))
-
-    extras = []
-    if kaution is not None:
-        extras.append(f"Kaution {kaution} €")
-    if ablose is not None:
-        extras.append(f"Ablöse {ablose} €")
-    if extras:
-        lines.append("   " + "  ·  ".join(extras))
-
-    facts = []
-    size = (expose.get("size") or "").strip()
-    if size:
-        facts.append(f"📐 {esc(size)}")
-    rooms = (expose.get("rooms") or "").strip()
-    if rooms and rooms not in ("?", "0"):
-        facts.append(f"🚪 {esc(rooms)} Zi.")
-    if frei_ab:
-        facts.append(f"📅 ab {esc(frei_ab)}")
-    if facts:
-        lines.append("  ·  ".join(facts))
+    for emoji, label, key in (
+        ("🔑", "Kaltmiete", "kalt"),
+        ("💡", "Nebenkosten", "nk"),
+        ("➕", "Sonstige Kosten", "sonstige"),
+        ("🔒", "Kaution", "kaution"),
+        ("🔁", "Ablöse", "ablose"),
+    ):
+        val = expose.get(key)
+        if val:  # omit None and 0
+            lines.append(f"{emoji} {label}: {val} €")
 
     lines.append("")
-    lines.append(f'🔗 <a href="{esc(expose.get("url", ""))}">Open on wg-gesucht →</a>')
-    return "\n".join(lines)
+    if expose.get("size_m2"):
+        lines.append(f"📐 {expose['size_m2']} m²")
+    if expose.get("rooms_n"):
+        lines.append(f"🚪 {expose['rooms_n']} Zimmer")
+    if expose.get("frei_ab"):
+        lines.append(f"📅 frei ab {esc(expose['frei_ab'])}")
+
+    lines.append("")
+    lines.append(f'🔗 <a href="{esc(expose.get("url", ""))}">Auf wg-gesucht ansehen →</a>')
+    return "\n".join(lines)[:1024]  # Telegram caption limit
+
+
+def _post(base, method, payload):
+    resp = requests.post(f"{base}/{method}", data=payload, timeout=30)
+    if resp.status_code == 429:
+        retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+        time.sleep(min(int(retry_after), 30))
+        resp = requests.post(f"{base}/{method}", data=payload, timeout=30)
+    return resp
 
 
 def send_listing(token, chat_id, expose):
-    """Send one listing as a photo (with caption) or text. Returns True on success."""
+    """Send the listing: media group (all photos), or single photo, or text."""
     caption = build_caption(expose)
-    image = clean_image_url(expose.get("image"))
+    images = [u for u in (expose.get("images") or []) if u][:MAX_PHOTOS]
     base = f"https://api.telegram.org/bot{token}"
 
-    def post(method, payload):
-        resp = requests.post(f"{base}/{method}", data=payload, timeout=30)
-        if resp.status_code == 429:
-            retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
-            time.sleep(min(int(retry_after), 30))
-            resp = requests.post(f"{base}/{method}", data=payload, timeout=30)
-        return resp
-
     try:
-        if image:
-            resp = post("sendPhoto", {
-                "chat_id": chat_id, "photo": image,
+        if len(images) >= 2:
+            media = [{"type": "photo", "media": u} for u in images]
+            media[0]["caption"] = caption
+            media[0]["parse_mode"] = "HTML"
+            resp = _post(base, "sendMediaGroup", {"chat_id": chat_id, "media": json.dumps(media)})
+            if resp.status_code == 200:
+                return True
+            logger.warning("sendMediaGroup failed (%s): %s — trying single photo",
+                           resp.status_code, resp.text[:200])
+
+        if images:
+            resp = _post(base, "sendPhoto", {
+                "chat_id": chat_id, "photo": images[0],
                 "caption": caption, "parse_mode": "HTML",
             })
             if resp.status_code == 200:
@@ -208,7 +201,7 @@ def send_listing(token, chat_id, expose):
             logger.warning("sendPhoto failed (%s): %s — falling back to text",
                            resp.status_code, resp.text[:200])
 
-        resp = post("sendMessage", {
+        resp = _post(base, "sendMessage", {
             "chat_id": chat_id, "text": caption, "parse_mode": "HTML",
             "disable_web_page_preview": "false",
         })
@@ -230,24 +223,22 @@ def main():
     id_watch = IdMaintainer(f"{config.database_location()}/processed_ids.db")
     token = config.telegram_bot_token()
     receivers = config.telegram_receiver_ids() or []
+    max_price = (config.get("filters") or {}).get("max_price")
     test = os.environ.get("TEST", "").lower() == "true"
     prime = (not test) and (
         (os.environ.get("PRIME", "").lower() == "true") or not token or not receivers
     )
 
     hunter = Hunter(config, id_watch)
-    # Configured filters (max_price, ...) but NOT "already seen" — we dedup ourselves
-    # so a listing is marked seen only after it has been delivered.
     flat_filter = Filter.builder().read_config(config).build()
     exposes = flat_filter.filter(hunter.crawl_for_exposes())
 
-    # TEST: preview one sample (prefer an already-seen one) without touching dedup.
+    # TEST: preview one sample (prefer already-seen) without touching dedup.
     if test:
         if not token or not receivers:
             logger.error("TEST mode needs Telegram credentials (bot token + receiver id).")
             return
-        sample = None
-        fallback = None
+        sample = fallback = None
         for expose in exposes:
             if fallback is None:
                 fallback = expose
@@ -256,41 +247,47 @@ def main():
                 break
         sample = sample or fallback
         if sample is None:
-            logger.warning("No current listings under the price filter to sample.")
+            logger.warning("No listings under the price filter to sample.")
             return
         enrich(sample)
-        delivered = all(send_listing(token, chat_id, sample) for chat_id in receivers)
-        logger.info("TEST done — sample '%s' delivered=%s", sample.get("title"), delivered)
+        delivered = all(send_listing(token, c, sample) for c in receivers)
+        logger.info("TEST done — '%s' (%d photos) delivered=%s",
+                    sample.get("title"), len(sample.get("images") or []), delivered)
         return
 
-    if prime:
-        logger.info("SILENT mode (prime run, or no credentials) — recording listings, sending nothing.")
-    else:
-        logger.info("LIVE mode — sending to %d receiver(s).", len(receivers))
+    logger.info("SILENT mode — recording only." if prime
+                else "LIVE mode — sending to %d receiver(s)." % len(receivers))
 
-    new_count = 0
-    sent_count = 0
+    new_count = sent_count = 0
     for expose in exposes:
         expose_id = expose.get("id")
         if expose_id is None or id_watch.is_processed(expose_id):
             continue
-        new_count += 1
 
         if prime:
+            new_count += 1
             id_watch.mark_processed(expose_id)
             continue
 
         enrich(expose)
-        delivered = all(send_listing(token, chat_id, expose) for chat_id in receivers)
+        total = expose.get("total")
+        if total and max_price and total > int(max_price):
+            # Total rent (warm) over budget — skip, don't mark (re-check if it drops).
+            logger.info("Skip over-budget: '%s' total %d€ > %s€",
+                        expose.get("title"), total, max_price)
+            continue
+
+        new_count += 1
+        delivered = all(send_listing(token, c, expose) for c in receivers)
         if delivered:
             id_watch.mark_processed(expose_id)
             sent_count += 1
         else:
             logger.warning("Delivery failed for '%s' — will retry next run.",
                            expose.get("title", expose_id))
-        time.sleep(1)  # gentle pacing for Telegram flood limits
+        time.sleep(1)
 
-    logger.info("Done. New listings: %d, messages sent: %d, mode: %s",
+    logger.info("Done. New: %d, sent: %d, mode: %s",
                 new_count, sent_count, "silent" if prime else "live")
 
 
