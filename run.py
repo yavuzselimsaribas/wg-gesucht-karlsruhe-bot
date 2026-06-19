@@ -238,18 +238,20 @@ def main():
         if not token or not receivers:
             logger.error("TEST mode needs Telegram credentials (bot token + receiver id).")
             return
-        sample = fallback = None
+        candidates = []
         for expose in exposes:
-            if fallback is None:
-                fallback = expose
-            if id_watch.is_processed(expose.get("id")):
-                sample = expose
+            candidates.append(expose)
+            if len(candidates) >= 15:
                 break
-        sample = sample or fallback
-        if sample is None:
+        if not candidates:
             logger.warning("No listings under the price filter to sample.")
             return
-        enrich(sample)
+        for cand in candidates:
+            enrich(cand)
+        # Prefer already-seen listings (so a preview can't double-send a real alert
+        # later); among those, pick the one with the most photos for a fuller demo.
+        seen = [c for c in candidates if id_watch.is_processed(c.get("id"))]
+        sample = max(seen or candidates, key=lambda e: len(e.get("images") or []))
         delivered = all(send_listing(token, c, sample) for c in receivers)
         logger.info("TEST done — '%s' (%d photos) delivered=%s",
                     sample.get("title"), len(sample.get("images") or []), delivered)

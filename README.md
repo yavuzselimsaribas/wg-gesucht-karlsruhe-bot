@@ -1,89 +1,25 @@
 # wg-gesucht Karlsruhe alert bot
 
-Telegram alerts for **new** rental listings in Karlsruhe on
-[wg-gesucht.de](https://www.wg-gesucht.de), under €500. Runs 24/7 for free on
-GitHub Actions using [Flathunter](https://github.com/flathunters/flathunter).
-
-## What it watches
-
-| Category | URL |
-|----------|-----|
-| WG rooms | `wg-zimmer-in-Karlsruhe.68.0.1.0.html` |
-| 1-room apartments | `1-zimmer-wohnungen-in-Karlsruhe.68.1.1.0.html` |
-| Apartments | `wohnungen-in-Karlsruhe.68.2.1.0.html` |
-
-Filter: `max_price: 500`. Edit [`config.yaml`](config.yaml) to change URLs,
-price, size, rooms, or excluded titles — then commit and push.
-
-## How it works
-
-1. A scheduled GitHub Actions job ([`.github/workflows/hunt.yml`](.github/workflows/hunt.yml))
-   runs roughly every 10 minutes.
-2. It clones Flathunter (for its battle-tested wg-gesucht crawler + filters) and
-   runs [`run.py`](run.py), which scrapes the URLs above and applies your filters.
-3. For each **new** listing, `run.py` sends a Telegram card: the listing **photo**
-   plus a formatted caption — title, price, size, rooms — with a clickable link.
-   (If a listing has no usable photo, it falls back to a text message.)
-4. Seen listing IDs are stored in `processed_ids.db`, committed back to this repo
-   so the bot remembers across runs. **Do not delete it** or you'll get duplicates.
-
-Only **new** offers are sent — there is no backfill of old listings. The first
-run is a silent "prime" that records what's currently live without notifying.
-
-The bot is already **primed** — current listings are recorded as "seen" and the
-schedule is **paused** until you connect Telegram. Once you run the setup below it
-goes live and alerts you on every listing that's new from that point on (no backlog
-dump, and nothing silently missed in between).
+Telegram alerts for new [wg-gesucht](https://www.wg-gesucht.de) listings in
+Karlsruhe under €500. Runs free, 24/7, on GitHub Actions. Each new listing arrives
+as a card: all photos, cost breakdown, and a Google Maps link.
 
 ## Setup (one time)
 
-### 1. Create the Telegram bot
+1. **Create a Telegram bot** — message [@BotFather](https://t.me/BotFather) →
+   `/newbot` → copy the token. Then open your new bot and send it any message.
+2. **Connect** — from this folder:
+   ```bash
+   ./setup_telegram.sh <BOT_TOKEN>
+   ```
+   It finds your chat id, stores the secrets, and goes live.
 
-1. In Telegram, message [@BotFather](https://t.me/BotFather) → `/newbot` → follow
-   the prompts → copy the **bot token** (`123456:ABC-DEF...`).
-2. Open a chat with your new bot and send it any message (e.g. `hi`). Required —
-   a bot can't message you until you've messaged it first.
-
-### 2. Connect it — one command
-
-From this repo's directory:
-
-```bash
-./setup_telegram.sh <BOT_TOKEN>
-```
-
-That finds your chat id, sends a test message, stores both values as encrypted
-GitHub Actions secrets, and triggers the first live run. Done.
-
-### Manual alternative
+## Handy commands
 
 ```bash
-# chat id: message @userinfobot, or:
-curl "https://api.telegram.org/bot<TOKEN>/getUpdates"   # read result[].message.chat.id
-
-gh secret set TELEGRAM_BOT_TOKEN      # paste the bot token
-gh secret set TELEGRAM_RECEIVER_IDS   # paste your numeric chat id
-gh workflow enable hunt.yml           # un-pause the schedule
-gh workflow run hunt.yml              # go live now
+gh workflow run hunt.yml -f test=true        # preview a card now
+gh workflow disable "wg-gesucht hunt"         # pause
+gh workflow enable  "wg-gesucht hunt"         # resume
 ```
 
-## Controlling it
-
-- **Pause:** disable the workflow — `gh workflow disable "wg-gesucht hunt"`.
-- **Resume:** `gh workflow enable "wg-gesucht hunt"`.
-- **Run once now:** `gh workflow run hunt.yml`.
-- **Reset memory (re-alert everything):** delete `processed_ids.db`, commit, push.
-
-## Notes / caveats
-
-- **Cost:** free. Public repo ⇒ unlimited GitHub Actions minutes. No secrets are
-  exposed — the token and chat id live in encrypted Actions secrets, not the code.
-- **Timing:** GitHub delays scheduled jobs under load; expect every ~10–20 min,
-  not exact.
-- **Price basis:** `max_price` compares against the rent Flathunter parses from
-  the listing (usually total/warm). A few edge cases may slip through — adjust the
-  filter if needed.
-- **Inactivity:** GitHub auto-disables schedules after 60 days with no repo
-  commits. The state commits keep it alive as long as listings keep appearing.
-- **If scraping breaks:** wg-gesucht occasionally changes its markup. The workflow
-  tracks Flathunter's latest `main`, so upstream fixes flow in automatically.
+Edit the search or price in [`config.yaml`](config.yaml), then commit + push.
