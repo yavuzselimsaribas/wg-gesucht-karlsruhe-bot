@@ -18,7 +18,7 @@ urls:
 
 # Listings outside these limits are dropped before notifying. Tune freely.
 filters:
-    max_price: 500
+    max_price: 600
     # Optional extras — uncomment to use:
     # min_size: 15
     # excluded_titles:
