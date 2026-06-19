@@ -28,9 +28,10 @@ price, size, rooms, or excluded titles — then commit and push.
 Only **new** offers are sent — there is no backfill of old listings. The first
 run is a silent "prime" that records what's currently live without notifying.
 
-The bot is already **primed** (the first scheduled runs silently record current
-listings), so once you connect Telegram you only get alerts for genuinely *new*
-offers — no backlog dump.
+The bot is already **primed** — current listings are recorded as "seen" and the
+schedule is **paused** until you connect Telegram. Once you run the setup below it
+goes live and alerts you on every listing that's new from that point on (no backlog
+dump, and nothing silently missed in between).
 
 ## Setup (one time)
 
@@ -60,7 +61,8 @@ curl "https://api.telegram.org/bot<TOKEN>/getUpdates"   # read result[].message.
 
 gh secret set TELEGRAM_BOT_TOKEN      # paste the bot token
 gh secret set TELEGRAM_RECEIVER_IDS   # paste your numeric chat id
-gh workflow run hunt.yml              # go live now (or wait for the cron)
+gh workflow enable hunt.yml           # un-pause the schedule
+gh workflow run hunt.yml              # go live now
 ```
 
 ## Controlling it

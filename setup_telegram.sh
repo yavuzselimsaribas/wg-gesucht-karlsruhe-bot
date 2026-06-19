@@ -48,7 +48,8 @@ echo "==> Storing encrypted GitHub secrets..."
 printf '%s' "$TOKEN"   | gh secret set TELEGRAM_BOT_TOKEN
 printf '%s' "$CHAT_ID" | gh secret set TELEGRAM_RECEIVER_IDS
 
-echo "==> Triggering the first live run..."
+echo "==> Un-pausing the schedule and triggering the first live run..."
+gh workflow enable hunt.yml >/dev/null 2>&1 || true
 gh workflow run hunt.yml
 
 echo ""
