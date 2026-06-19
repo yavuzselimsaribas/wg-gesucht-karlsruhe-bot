@@ -39,7 +39,7 @@ socket.setdefaulttimeout(30)
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 IMG_BASE = "https://img.wg-gesucht.de/"
-MAX_PHOTOS = 6  # photos sent per listing (Telegram allows up to 10 per group)
+MAX_PHOTOS = 5  # photos sent per listing (Telegram allows up to 10 per group)
 
 
 def parse_args():
