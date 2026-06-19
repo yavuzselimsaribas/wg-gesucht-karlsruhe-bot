@@ -1,15 +1,9 @@
 ---
-# wg-gesucht Karlsruhe alert bot — Flathunter configuration.
+# wg-gesucht Karlsruhe alert bot — search configuration.
 #
-# This file holds only NON-SECRET settings and is safe to commit publicly.
-# The Telegram bot token and your chat id are injected at runtime via
-# FLATHUNTER_* environment variables (GitHub Actions secrets) and are never
-# stored here. See .github/workflows/hunt.yml.
-
-# Run a single pass per invocation. GitHub Actions cron handles repetition,
-# so Flathunter must NOT loop internally.
-loop:
-    active: false
+# Non-secret and safe to commit publicly. Messages are sent by run.py using the
+# Telegram bot token + chat id that the GitHub Actions workflow injects from
+# encrypted secrets (FLATHUNTER_TELEGRAM_BOT_TOKEN / FLATHUNTER_TELEGRAM_RECEIVER_IDS).
 
 # What to watch. wg-gesucht URL pattern:
 #   <type>-in-Karlsruhe.68.<category>.1.0.html   (68 = Karlsruhe city id)
@@ -22,30 +16,11 @@ urls:
     # Apartments (Wohnung, any room count)
     - https://www.wg-gesucht.de/wohnungen-in-Karlsruhe.68.2.1.0.html
 
-# Drop anything above your budget. Flathunter compares against the total
-# rent shown on the listing. Raise/lower this anytime.
+# Listings outside these limits are dropped before notifying. Tune freely.
 filters:
     max_price: 500
-
-# Telegram message body. Available placeholders:
-# {title} {price} {size} {rooms} {address} {url} {crawler} {durations}
-message: |
-    🏠 {title}
-    💶 {price}    📐 {size}    🚪 {rooms}
-    📍 {address}
-
-    {url}
-
-title: "New wg-gesucht listing"
-
-# Telegram notifier is always active. Whether messages actually go out depends on
-# credentials: the GitHub Actions workflow injects the bot token + your chat id
-# (from encrypted secrets) on live runs. With no credentials — a PRIME run, or any
-# run before you've set the secrets — the receiver list is empty, so Flathunter
-# runs the full pipeline and RECORDS listings without sending anything.
-notifiers:
-    - telegram
-
-telegram:
-
-captcha:
+    # Optional extras — uncomment to use:
+    # min_size: 15
+    # excluded_titles:
+    #   - "(?i)tausch"         # hide swap ("Tausch") offers
+    #   - "(?i)zwischenmiete"  # hide short-term sublets

@@ -19,11 +19,13 @@ price, size, rooms, or excluded titles — then commit and push.
 
 1. A scheduled GitHub Actions job ([`.github/workflows/hunt.yml`](.github/workflows/hunt.yml))
    runs roughly every 10 minutes.
-2. It clones Flathunter, scrapes the URLs above, and filters by your criteria.
-3. New listings (not seen before) are sent to your Telegram.
-4. Seen listing IDs are stored in `processed_ids.db`, which is committed back to
-   this repo so the bot remembers across runs. **Do not delete it** or you'll get
-   duplicate alerts.
+2. It clones Flathunter (for its battle-tested wg-gesucht crawler + filters) and
+   runs [`run.py`](run.py), which scrapes the URLs above and applies your filters.
+3. For each **new** listing, `run.py` sends a Telegram card: the listing **photo**
+   plus a formatted caption — title, price, size, rooms — with a clickable link.
+   (If a listing has no usable photo, it falls back to a text message.)
+4. Seen listing IDs are stored in `processed_ids.db`, committed back to this repo
+   so the bot remembers across runs. **Do not delete it** or you'll get duplicates.
 
 Only **new** offers are sent — there is no backfill of old listings. The first
 run is a silent "prime" that records what's currently live without notifying.

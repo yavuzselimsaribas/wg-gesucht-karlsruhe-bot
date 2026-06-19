@@ -52,23 +52,16 @@ jobs:
       - name: Hunt
         working-directory: ${{ runner.temp }}/flathunter
         env:
+          # The flathunter package lives in the cloned dir — add it to the import path
+          # so our run.py (which lives in this repo) can import it.
+          PYTHONPATH: ${{ runner.temp }}/flathunter
           FLATHUNTER_DATABASE_LOCATION: ${{ github.workspace }}
           PRIME: ${{ github.event.inputs.prime }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_RECEIVER_IDS: ${{ secrets.TELEGRAM_RECEIVER_IDS }}
-        run: |
-          if [ "$PRIME" != "true" ] && [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_RECEIVER_IDS" ]; then
-            echo "Live mode: notifications ON"
-            export FLATHUNTER_TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
-            export FLATHUNTER_TELEGRAM_RECEIVER_IDS="$TELEGRAM_RECEIVER_IDS"
-          else
-            echo "::notice::Silent mode (prime run, or secrets not set yet) — recording listings, NO messages sent"
-            # Flathunter aborts if 'telegram' is in notifiers with no bot token, so we
-            # pass a dummy token. With no receiver ids the broadcast loop is empty, so
-            # this token is never actually used and nothing is ever sent.
-            export FLATHUNTER_TELEGRAM_BOT_TOKEN="prime-no-send"
-          fi
-          pipenv run python flathunt.py -c "$GITHUB_WORKSPACE/config.yaml"
+          # When these secrets are set (and not a prime run), run.py sends messages;
+          # when empty, it silently records listings. Values are never printed.
+          FLATHUNTER_TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          FLATHUNTER_TELEGRAM_RECEIVER_IDS: ${{ secrets.TELEGRAM_RECEIVER_IDS }}
+        run: pipenv run python "$GITHUB_WORKSPACE/run.py" -c "$GITHUB_WORKSPACE/config.yaml"
 
       - name: Commit updated seen-listings
         run: |
