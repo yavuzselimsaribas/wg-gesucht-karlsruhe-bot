@@ -11,6 +11,10 @@ on:
         description: "Prime DB silently (record current listings, send NO Telegram messages)"
         type: boolean
         default: false
+      test:
+        description: "Send ONE sample listing now to preview the card (does not affect dedup)"
+        type: boolean
+        default: false
 
 # Never run two hunts at once, so the state-commit step can't race itself.
 concurrency:
@@ -57,6 +61,7 @@ jobs:
           PYTHONPATH: ${{ runner.temp }}/flathunter
           FLATHUNTER_DATABASE_LOCATION: ${{ github.workspace }}
           PRIME: ${{ github.event.inputs.prime }}
+          TEST: ${{ github.event.inputs.test }}
           # When these secrets are set (and not a prime run), run.py sends messages;
           # when empty, it silently records listings. Values are never printed.
           FLATHUNTER_TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

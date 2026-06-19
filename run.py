@@ -135,18 +135,44 @@ def main():
 
     token = config.telegram_bot_token()
     receivers = config.telegram_receiver_ids() or []
-    prime = (os.environ.get("PRIME", "").lower() == "true") or not token or not receivers
-
-    if prime:
-        logger.info("SILENT mode (prime run, or no credentials) — recording listings, sending nothing.")
-    else:
-        logger.info("LIVE mode — sending to %d receiver(s).", len(receivers))
+    test = os.environ.get("TEST", "").lower() == "true"
+    prime = (not test) and (
+        (os.environ.get("PRIME", "").lower() == "true") or not token or not receivers
+    )
 
     hunter = Hunter(config, id_watch)
     # Apply the configured filters (max_price, etc.) but NOT "already seen" — we do
     # our own dedup so we can mark a listing seen only after it was sent successfully.
     flat_filter = Filter.builder().read_config(config).build()
     exposes = flat_filter.filter(hunter.crawl_for_exposes())
+
+    # TEST mode: send ONE sample listing so you can preview the card, without
+    # touching dedup. Prefer an already-seen listing that has an image, so the
+    # preview never "uses up" a genuinely new listing.
+    if test:
+        if not token or not receivers:
+            logger.error("TEST mode needs Telegram credentials (bot token + receiver id).")
+            return
+        sample = None
+        fallback = None
+        for expose in exposes:
+            if fallback is None:
+                fallback = expose
+            if clean_image_url(expose.get("image")) and id_watch.is_processed(expose.get("id")):
+                sample = expose
+                break
+        sample = sample or fallback
+        if sample is None:
+            logger.warning("No current listings under the price filter to sample.")
+            return
+        delivered = all(send_listing(token, chat_id, sample) for chat_id in receivers)
+        logger.info("TEST done — sample '%s' delivered=%s", sample.get("title"), delivered)
+        return
+
+    if prime:
+        logger.info("SILENT mode (prime run, or no credentials) — recording listings, sending nothing.")
+    else:
+        logger.info("LIVE mode — sending to %d receiver(s).", len(receivers))
 
     new_count = 0
     sent_count = 0
