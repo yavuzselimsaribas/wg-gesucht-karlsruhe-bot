@@ -28,34 +28,39 @@ price, size, rooms, or excluded titles — then commit and push.
 Only **new** offers are sent — there is no backfill of old listings. The first
 run is a silent "prime" that records what's currently live without notifying.
 
+The bot is already **primed** (the first scheduled runs silently record current
+listings), so once you connect Telegram you only get alerts for genuinely *new*
+offers — no backlog dump.
+
 ## Setup (one time)
 
-### 1. Telegram bot
+### 1. Create the Telegram bot
 
 1. In Telegram, message [@BotFather](https://t.me/BotFather) → `/newbot` → follow
-   prompts → copy the **bot token** (`123456:ABC-DEF...`).
+   the prompts → copy the **bot token** (`123456:ABC-DEF...`).
 2. Open a chat with your new bot and send it any message (e.g. `hi`). Required —
-   the bot can't message you until you've started the conversation.
-3. Get your numeric **chat id**: message [@userinfobot](https://t.me/userinfobot),
-   it replies with your `Id`. (Alternatively: `curl https://api.telegram.org/bot<TOKEN>/getUpdates`
-   and read `message.chat.id`.)
+   a bot can't message you until you've messaged it first.
 
-### 2. GitHub secrets
+### 2. Connect it — one command
 
-Store the credentials as encrypted Actions secrets (never in the code):
+From this repo's directory:
 
 ```bash
-gh secret set TELEGRAM_BOT_TOKEN     # paste the bot token
-gh secret set TELEGRAM_RECEIVER_IDS  # paste your numeric chat id
+./setup_telegram.sh <BOT_TOKEN>
 ```
 
-### 3. Prime, then go live
+That finds your chat id, sends a test message, stores both values as encrypted
+GitHub Actions secrets, and triggers the first live run. Done.
+
+### Manual alternative
 
 ```bash
-# Silent first run — record current listings, send nothing:
-gh workflow run hunt.yml -f prime=true
+# chat id: message @userinfobot, or:
+curl "https://api.telegram.org/bot<TOKEN>/getUpdates"   # read result[].message.chat.id
 
-# After that completes, the scheduled runs alert you on genuinely new listings.
+gh secret set TELEGRAM_BOT_TOKEN      # paste the bot token
+gh secret set TELEGRAM_RECEIVER_IDS   # paste your numeric chat id
+gh workflow run hunt.yml              # go live now (or wait for the cron)
 ```
 
 ## Controlling it
