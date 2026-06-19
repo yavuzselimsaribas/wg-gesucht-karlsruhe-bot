@@ -38,9 +38,13 @@ message: |
 
 title: "New wg-gesucht listing"
 
-# Left empty on purpose: with no notifier here, a PRIME run stays silent.
-# Live runs set notifiers + Telegram credentials via env vars instead.
+# Telegram notifier is always active. Whether messages actually go out depends on
+# credentials: the GitHub Actions workflow injects the bot token + your chat id
+# (from encrypted secrets) on live runs. With no credentials — a PRIME run, or any
+# run before you've set the secrets — the receiver list is empty, so Flathunter
+# runs the full pipeline and RECORDS listings without sending anything.
 notifiers:
+    - telegram
 
 telegram:
 

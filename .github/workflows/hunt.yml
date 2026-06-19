@@ -57,12 +57,12 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_RECEIVER_IDS: ${{ secrets.TELEGRAM_RECEIVER_IDS }}
         run: |
-          if [ "$PRIME" = "true" ]; then
-            echo "::notice::PRIME mode — recording current listings, NO notifications"
-          else
-            export FLATHUNTER_NOTIFIERS="telegram"
+          if [ "$PRIME" != "true" ] && [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_RECEIVER_IDS" ]; then
+            echo "Live mode: notifications ON"
             export FLATHUNTER_TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
             export FLATHUNTER_TELEGRAM_RECEIVER_IDS="$TELEGRAM_RECEIVER_IDS"
+          else
+            echo "::notice::Silent mode (prime run, or secrets not set yet) — recording listings, NO messages sent"
           fi
           pipenv run python flathunt.py -c "$GITHUB_WORKSPACE/config.yaml"
 
