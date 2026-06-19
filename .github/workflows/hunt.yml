@@ -63,6 +63,10 @@ jobs:
             export FLATHUNTER_TELEGRAM_RECEIVER_IDS="$TELEGRAM_RECEIVER_IDS"
           else
             echo "::notice::Silent mode (prime run, or secrets not set yet) — recording listings, NO messages sent"
+            # Flathunter aborts if 'telegram' is in notifiers with no bot token, so we
+            # pass a dummy token. With no receiver ids the broadcast loop is empty, so
+            # this token is never actually used and nothing is ever sent.
+            export FLATHUNTER_TELEGRAM_BOT_TOKEN="prime-no-send"
           fi
           pipenv run python flathunt.py -c "$GITHUB_WORKSPACE/config.yaml"
 
