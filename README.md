@@ -18,6 +18,7 @@ as a card: all photos, cost breakdown, and a Google Maps link.
 
 ```bash
 gh workflow run hunt.yml -f test=true        # preview a card now
+./add_receivers.sh <BOT_TOKEN>                # add you + friends (each must message the bot first)
 gh workflow disable "wg-gesucht hunt"         # pause
 gh workflow enable  "wg-gesucht hunt"         # resume
 ```
